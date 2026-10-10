@@ -111,6 +111,15 @@ CONFIG_SCHEMA = cv.typed_schema(
 )
 CONFIG_SCHEMA = cv.All(CONFIG_SCHEMA, validate_poll_intervals)
 
+# Both CN-CNT and CN-WLAN run at 9600 baud 8E1, catch a mismatching uart: block
+FINAL_VALIDATE_SCHEMA = uart.final_validate_device_schema(
+    "panasonic_ac",
+    baud_rate=9600,
+    data_bits=8,
+    parity="EVEN",
+    stop_bits=1,
+)
+
 
 async def to_code(config):
     var = await climate.new_climate(config)
