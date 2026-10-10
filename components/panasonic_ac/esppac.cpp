@@ -106,7 +106,13 @@ void PanasonicAC::update_target_temperature(uint8_t raw_value) {
 
 void PanasonicAC::update_swing_horizontal(const StringRef &swing) {
   if (this->horizontal_swing_select_ != nullptr) {
-    this->horizontal_swing_state_ = this->horizontal_swing_select_->index_of(swing).value_or(~0UL);
+    auto index = this->horizontal_swing_select_->index_of(swing);
+    if (!index.has_value()) {
+      ESP_LOGV(TAG, "Horizontal swing position '%s' has no select option", swing.c_str());
+      return;  // e.g. "unsupported"/"Unknown", publishing an invalid index only logs errors
+    }
+
+    this->horizontal_swing_state_ = *index;
 
     if (this->horizontal_swing_state_ != this->horizontal_swing_select_->active_index().value_or(~0UL)) {
       this->horizontal_swing_select_->publish_state(this->horizontal_swing_state_);  // Set current horizontal swing position
@@ -116,7 +122,13 @@ void PanasonicAC::update_swing_horizontal(const StringRef &swing) {
 
 void PanasonicAC::update_swing_vertical(const StringRef &swing) {
   if (this->vertical_swing_select_ != nullptr) {
-    this->vertical_swing_state_ = this->vertical_swing_select_->index_of(swing).value_or(~0UL);
+    auto index = this->vertical_swing_select_->index_of(swing);
+    if (!index.has_value()) {
+      ESP_LOGV(TAG, "Vertical swing position '%s' has no select option", swing.c_str());
+      return;  // e.g. "unsupported"/"Unknown", publishing an invalid index only logs errors
+    }
+
+    this->vertical_swing_state_ = *index;
 
     if (this->vertical_swing_state_ != this->vertical_swing_select_->active_index().value_or(~0UL)) {
       this->vertical_swing_select_->publish_state(this->vertical_swing_state_);  // Set current vertical swing position

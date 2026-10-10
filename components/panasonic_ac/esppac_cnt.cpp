@@ -172,7 +172,8 @@ static bool determine_mild_dry(uint8_t value) {
 }
 
 uint16_t determine_power_consumption(uint8_t byte_28, uint8_t byte_29, uint8_t offset) {
-  return (uint16_t) (byte_28 + (byte_29 * 256)) - offset;
+  int32_t power = (int32_t) byte_28 + ((int32_t) byte_29 * 256) - offset;
+  return power > 0 ? (uint16_t) power : 0;  // Never wrap around to a huge or negative value
 }
 
 void PanasonicACCNT::setup() {
@@ -450,11 +451,15 @@ void PanasonicACCNT::set_data(bool set) {
     }
   }
 
-  if (verticalSwing == "auto" && horizontalSwing == "auto")
+  // "swing" (0xE) moves the vertical vanes just like "auto"
+  const bool vertical_moving = verticalSwing == "auto" || verticalSwing == "swing";
+  const bool horizontal_moving = horizontalSwing == "auto";
+
+  if (vertical_moving && horizontal_moving)
     this->swing_mode = climate::CLIMATE_SWING_BOTH;
-  else if (verticalSwing == "auto")
+  else if (vertical_moving)
     this->swing_mode = climate::CLIMATE_SWING_VERTICAL;
-  else if (horizontalSwing == "auto")
+  else if (horizontal_moving)
     this->swing_mode = climate::CLIMATE_SWING_HORIZONTAL;
   else
     this->swing_mode = climate::CLIMATE_SWING_OFF;
@@ -711,10 +716,10 @@ void PanasonicACCNT::on_nanoex_change(bool state) {
 
   if (state) {
     ESP_LOGV(TAG, "Turning nanoex on");
-    this->cmd[5] = (this->cmd[5] & 0x0F) + 0x40;
+    this->cmd[5] |= 0x40;  // Only touch the nanoex bit
   } else {
     ESP_LOGV(TAG, "Turning nanoex off");
-    this->cmd[5] = (this->cmd[5] & 0x0F);
+    this->cmd[5] &= ~0x40;
   }
 }
 
@@ -745,10 +750,10 @@ void PanasonicACCNT::on_econavi_change(bool state) {
 
   if (state) {
     ESP_LOGV(TAG, "Turning econavi mode on");
-    this->cmd[5] = 0x10;
+    this->cmd[5] |= 0x10;  // Only touch the econavi bit, keep preset and nanoex
   } else {
     ESP_LOGV(TAG, "Turning econavi mode off");
-    this->cmd[5] = 0x00;
+    this->cmd[5] &= ~0x10;
   }
 }
 

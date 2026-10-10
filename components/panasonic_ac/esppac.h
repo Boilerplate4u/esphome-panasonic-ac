@@ -62,8 +62,8 @@ class PanasonicAC : public Component, public uart::UARTDevice, public climate::C
   sensor::Sensor *current_power_consumption_sensor_ = nullptr;  // Sensor to store current power consumption from queries
   binary_sensor::BinarySensor *defrost_sensor_ = nullptr;       // Sensor to store defrost status
 
-  size_t vertical_swing_state_;
-  size_t horizontal_swing_state_;
+  size_t vertical_swing_state_ = SIZE_MAX;    // Index of the current vertical swing option
+  size_t horizontal_swing_state_ = SIZE_MAX;  // Index of the current horizontal swing option
 
   int8_t current_temperature_offset_ = 0;  // current temperature offset to compensate internal sensor values
   int8_t outside_temperature_offset_ = 0;  // outside temperature offset to compensate internal sensor values
