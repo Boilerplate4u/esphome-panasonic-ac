@@ -56,6 +56,11 @@ class PanasonicACCNT : public PanasonicAC {
   bool cmd_refresh_poll_sent_{false};
   uint32_t cmd_refresh_poll_time_{0};
 
+  std::vector<uint8_t> frame_;  // Current complete frame taken from the receive buffer
+  bool comm_lost_{false};       // No valid response from the AC for too long
+
+  void process_rx();
+  void check_communication();
   void handle_poll();
   void handle_cmd();
   void prepare_cmd();

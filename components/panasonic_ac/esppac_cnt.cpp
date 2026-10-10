@@ -3,7 +3,9 @@
 
 #include "esphome/core/log.h"
 
+#include <algorithm>
 #include <cinttypes>
+#include <cmath>
 
 namespace esphome {
 namespace panasonic_ac {
@@ -176,6 +178,10 @@ uint16_t determine_power_consumption(uint8_t byte_28, uint8_t byte_29, uint8_t o
 void PanasonicACCNT::setup() {
   PanasonicAC::setup();
 
+  this->last_read_ = millis();
+  this->last_packet_received_ = millis();
+  this->last_change_ = millis();  // Start with fast polling after boot
+
   ESP_LOGD(TAG, "Using CZ-TACG1 protocol via CN-CNT");
 }
 
@@ -188,24 +194,91 @@ void PanasonicACCNT::dump_config() {
 
 void PanasonicACCNT::loop() {
   PanasonicAC::read_data();
+  this->process_rx();
 
-  if (millis() - this->last_read_ > READ_TIMEOUT &&
-      !this->rx_buffer_.empty())  // Check if our read timed out and we received something
-  {
+  // Discard an incomplete frame once the line has been quiet for too long
+  if (!this->rx_buffer_.empty() && millis() - this->last_read_ > READ_TIMEOUT) {
+    ESP_LOGD(TAG, "Dropping incomplete packet (%u bytes)", (unsigned) this->rx_buffer_.size());
     log_packet(this->rx_buffer_);
+    this->rx_buffer_.clear();
+  }
 
-    if (!verify_packet())  // Verify length, header, counter and checksum
-      return;
+  this->check_communication();
+  handle_cmd();
+  handle_poll();  // Handle sending poll packets
+}
+
+/*
+ * Split the receive buffer into frames using the length byte, so back-to-back
+ * packets are not merged. Leading garbage is skipped until a known header.
+ */
+void PanasonicACCNT::process_rx() {
+  while (!this->rx_buffer_.empty()) {
+    if (this->rx_buffer_[0] != CTRL_HEADER && this->rx_buffer_[0] != POLL_HEADER) {
+      size_t skip = 1;
+      while (skip < this->rx_buffer_.size() && this->rx_buffer_[skip] != CTRL_HEADER &&
+             this->rx_buffer_[skip] != POLL_HEADER)
+        skip++;
+      ESP_LOGW(TAG, "Dropping %u bytes without valid header", (unsigned) skip);
+      this->rx_buffer_.erase(this->rx_buffer_.begin(), this->rx_buffer_.begin() + skip);
+      continue;
+    }
+
+    if (this->rx_buffer_.size() < 2)
+      return;  // Wait for the length byte
+
+    const size_t len = (size_t) this->rx_buffer_[1] + 3;  // Header, length and checksum
+    if (len > BUFFER_SIZE) {
+      ESP_LOGW(TAG, "Dropping invalid packet (length %u)", (unsigned) len);
+      this->rx_buffer_.erase(this->rx_buffer_.begin());  // Resync on next header
+      continue;
+    }
+
+    if (this->rx_buffer_.size() < len)
+      return;  // Wait for the rest of the frame
+
+    this->frame_.assign(this->rx_buffer_.begin(), this->rx_buffer_.begin() + len);
+    this->rx_buffer_.erase(this->rx_buffer_.begin(), this->rx_buffer_.begin() + len);
+    log_packet(this->frame_);
+
+    if (!verify_packet())
+      continue;
 
     this->waiting_for_response_ = false;
     this->last_packet_received_ = millis();  // Set the time at which we received our last packet
 
-    handle_packet();
+    if (this->comm_lost_) {
+      ESP_LOGI(TAG, "Communication with AC restored");
+      this->comm_lost_ = false;
+      this->status_clear_warning();
+    }
 
-    this->rx_buffer_.clear();  // Reset buffer
+    handle_packet();
   }
-  handle_cmd();
-  handle_poll();  // Handle sending poll packets
+}
+
+/*
+ * Flag a warning and invalidate sensor values when the AC stops answering
+ */
+void PanasonicACCNT::check_communication() {
+  if (this->comm_lost_)
+    return;
+
+  const uint32_t timeout = 3 * std::max(this->poll_interval_fast_, this->poll_interval_slow_) + 2000;
+  if (millis() - this->last_packet_received_ <= timeout)
+    return;
+
+  ESP_LOGW(TAG, "No valid response from AC for %" PRIu32 " ms", timeout);
+  this->comm_lost_ = true;
+  this->status_set_warning();
+
+  if (this->current_temperature_sensor_ == nullptr)
+    this->current_temperature = NAN;
+  if (this->outside_temperature_sensor_ != nullptr)
+    this->outside_temperature_sensor_->publish_state(NAN);
+  if (this->current_power_consumption_sensor_ != nullptr)
+    this->current_power_consumption_sensor_->publish_state(NAN);
+  this->publish_state();
 }
 
 /*
@@ -334,35 +407,42 @@ void PanasonicACCNT::set_data(bool set) {
   this->update_target_temperature((int8_t) this->data[1]);
 
   if (set) {
+    // Payload byte i exists only if it is not the trailing checksum
+    auto has = [this](size_t i) { return i + 1 < this->frame_.size(); };
+
     // Also set current and outside temperature
     // 128 means not supported
     if (this->current_temperature_sensor_ == nullptr) {
-      if (this->rx_buffer_[18] != 0x80)
-        this->update_current_temperature((int8_t) this->rx_buffer_[18]);
-      else if (this->rx_buffer_[21] != 0x80)
-        this->update_current_temperature((int8_t) this->rx_buffer_[21]);
+      if (has(18) && this->frame_[18] != 0x80)
+        this->update_current_temperature((int8_t) this->frame_[18]);
+      else if (has(21) && this->frame_[21] != 0x80)
+        this->update_current_temperature((int8_t) this->frame_[21]);
       else
         ESP_LOGV(TAG, "Current temperature is not supported");
     }
 
     if (this->outside_temperature_sensor_ != nullptr) {
-      if (this->rx_buffer_[19] != 0x80)
-        this->update_outside_temperature((int8_t) this->rx_buffer_[19]);
-      else if (this->rx_buffer_[22] != 0x80)
-        this->update_outside_temperature((int8_t) this->rx_buffer_[22]);
+      if (has(19) && this->frame_[19] != 0x80)
+        this->update_outside_temperature((int8_t) this->frame_[19]);
+      else if (has(22) && this->frame_[22] != 0x80)
+        this->update_outside_temperature((int8_t) this->frame_[22]);
       else
         ESP_LOGV(TAG, "Outside temperature is not supported");
     }
 
     if (this->current_power_consumption_sensor_ != nullptr) {
-      uint16_t power_consumption = determine_power_consumption(
-          (int8_t) this->rx_buffer_[28], (int8_t) this->rx_buffer_[29], (int8_t) this->rx_buffer_[30]);
-      this->update_current_power_consumption(power_consumption);
+      if (has(30)) {
+        uint16_t power_consumption =
+            determine_power_consumption(this->frame_[28], this->frame_[29], this->frame_[30]);
+        this->update_current_power_consumption(power_consumption);
+      } else {
+        ESP_LOGV(TAG, "Power consumption is not supported");
+      }
     }
 
     if (this->defrost_sensor_ != nullptr) {
-      if (this->rx_buffer_.size() >= 15) {
-        bool defrost = (this->rx_buffer_[14] == 0x02);
+      if (has(14)) {
+        bool defrost = (this->frame_[14] == 0x02);
         update_defrost(defrost);
       } else {
         ESP_LOGV(TAG, "Defrost status is not supported");
@@ -514,39 +594,15 @@ void PanasonicACCNT::handle_cmd() {
  */
 
 bool PanasonicACCNT::verify_packet() {
-  if (this->rx_buffer_.size() < 12) {
-    ESP_LOGW(TAG, "Dropping invalid packet (length)");
-
-    this->rx_buffer_.clear();  // Reset buffer
-    return false;
-  }
-
-  // Check if header matches
-  if (this->rx_buffer_[0] != CTRL_HEADER && this->rx_buffer_[0] != POLL_HEADER) {
-    ESP_LOGW(TAG, "Dropping invalid packet (header)");
-
-    this->rx_buffer_.clear();  // Reset buffer
-    return false;
-  }
-
-  // Packet length minus header, packet length and checksum
-  if (this->rx_buffer_[1] != this->rx_buffer_.size() - 3) {
-    ESP_LOGD(TAG, "Dropping invalid packet (length mismatch)");
-
-    this->rx_buffer_.clear();  // Reset buffer
-    return false;
-  }
-
+  // Header and length were checked while framing
   uint8_t checksum = 0;
 
-  for (uint8_t b : this->rx_buffer_) {
+  for (uint8_t b : this->frame_) {
     checksum += b;
   }
 
   if (checksum != 0) {
     ESP_LOGD(TAG, "Dropping invalid packet (checksum)");
-
-    this->rx_buffer_.clear();  // Reset buffer
     return false;
   }
 
@@ -554,8 +610,13 @@ bool PanasonicACCNT::verify_packet() {
 }
 
 void PanasonicACCNT::handle_packet() {
-  if (this->rx_buffer_[0] == POLL_HEADER) {
-    std::vector<uint8_t> new_data(this->rx_buffer_.begin() + 2, this->rx_buffer_.begin() + 12);
+  if (this->frame_[0] == POLL_HEADER) {
+    if (this->frame_.size() < 13) {  // Header, length, 10 data bytes and checksum
+      ESP_LOGW(TAG, "Dropping too short poll response (%u bytes)", (unsigned) this->frame_.size());
+      return;
+    }
+
+    std::vector<uint8_t> new_data(this->frame_.begin() + 2, this->frame_.begin() + 12);
 
     if (this->state_ == ACState::Ready && new_data != this->data) {
       ESP_LOGV(TAG, "AC state changed, switching to fast polling");
