@@ -60,6 +60,7 @@ class PanasonicACCNT : public PanasonicAC {
 
   std::vector<uint8_t> frame_;  // Current complete frame taken from the receive buffer
   bool comm_lost_{false};       // No valid response from the AC for too long
+  int32_t power_consumption_{-1};  // Last estimated power in W, -1 if unknown
 
   bool has_published_{false};             // Climate state was published at least once
   std::vector<uint8_t> published_data_;   // Last published settings bytes

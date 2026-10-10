@@ -451,14 +451,14 @@ void PanasonicACCNT::set_data(bool set) {
         ESP_LOGV(TAG, "Outside temperature is not supported");
     }
 
-    if (this->current_power_consumption_sensor_ != nullptr) {
-      if (has(30)) {
-        uint16_t power_consumption =
-            determine_power_consumption(this->frame_[28], this->frame_[29], this->frame_[30]);
-        this->update_current_power_consumption(power_consumption);
-      } else {
-        ESP_LOGV(TAG, "Power consumption is not supported");
-      }
+    // Power is parsed even without a sensor, it is also used for the action
+    if (has(30)) {
+      this->power_consumption_ =
+          determine_power_consumption(this->frame_[28], this->frame_[29], this->frame_[30]);
+      this->update_current_power_consumption(this->power_consumption_);
+    } else {
+      this->power_consumption_ = -1;
+      ESP_LOGV(TAG, "Power consumption is not supported");
     }
 
     if (this->defrost_sensor_ != nullptr) {
@@ -494,6 +494,12 @@ void PanasonicACCNT::set_data(bool set) {
   this->update_econavi(econavi);
   this->update_mild_dry(mildDry);
   this->action = this->determine_action();
+
+  // determine_action() only compares temperatures. When the AC reports no power
+  // draw at all the compressor is not running, so heating/cooling is idle.
+  if (this->power_consumption_ == 0 &&
+      (this->action == climate::CLIMATE_ACTION_HEATING || this->action == climate::CLIMATE_ACTION_COOLING))
+    this->action = climate::CLIMATE_ACTION_IDLE;
 }
 
 /*
