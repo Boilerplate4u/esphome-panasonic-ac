@@ -17,7 +17,7 @@ api:
 ota:
   platform: esphome
 
-# Requires ESPHome 1.15.0+ for the even parity option
+# 9600 baud, 8 data bits, even parity and 1 stop bit are required (checked at config time)
 uart:
   tx_pin: GPIO17
   rx_pin: GPIO16
@@ -25,7 +25,7 @@ uart:
   parity: EVEN
 
 external_components:
-  source: github://DomiStyle/esphome-panasonic-ac
+  source: github://Boilerplate4u/esphome-panasonic-ac@configurable-poll-and-swing
   components: [panasonic_ac]
 
 
@@ -65,3 +65,19 @@ climate:
 
     # Useful when the ac does not report a current temperature (CZ-TACG1 only)
     # current_temperature_sensor: temperature_sensor_id
+
+    # Polling (CZ-TACG1 only), defaults shown. Set poll_interval_slow to poll less
+    # often when nothing happens, e.g. 30s.
+    # poll_interval_fast: 5s
+    # poll_interval_slow: 5s
+    # fast_poll_window: 60s
+
+    # Simulated swing (CZ-TACG1 only): adds the option simulated_swing to the
+    # swing selects. ESPHome then steps the vane through these positions, also in
+    # heating mode where the AC's own auto airflow direction does not swing.
+    # Defaults shown.
+    # vertical_swing_interval: 10s
+    # horizontal_swing_interval: 10s
+    # vertical_swing_positions: [up, up_center, center, down_center, down]
+    # horizontal_swing_positions: [left, left_center, center, right_center, right]
+    # climate_swing: native   # or simulated: the climate entity's swing modes use the simulated swing
