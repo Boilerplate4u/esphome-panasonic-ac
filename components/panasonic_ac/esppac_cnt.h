@@ -2,6 +2,8 @@
 #include "esphome/components/climate/climate_mode.h"
 #include "esppac.h"
 
+#include <cmath>
+
 namespace esphome {
 namespace panasonic_ac {
 namespace CNT {
@@ -59,8 +61,14 @@ class PanasonicACCNT : public PanasonicAC {
   std::vector<uint8_t> frame_;  // Current complete frame taken from the receive buffer
   bool comm_lost_{false};       // No valid response from the AC for too long
 
+  bool has_published_{false};             // Climate state was published at least once
+  std::vector<uint8_t> published_data_;   // Last published settings bytes
+  float published_current_temperature_{NAN};
+  climate::ClimateAction published_action_{climate::CLIMATE_ACTION_OFF};
+
   void process_rx();
   void check_communication();
+  void publish_if_changed();
   void handle_poll();
   void handle_cmd();
   void prepare_cmd();

@@ -251,11 +251,31 @@ void PanasonicACCNT::process_rx() {
     if (this->comm_lost_) {
       ESP_LOGI(TAG, "Communication with AC restored");
       this->comm_lost_ = false;
+      this->has_published_ = false;  // Republish everything
       this->status_clear_warning();
     }
 
     handle_packet();
   }
+}
+
+/*
+ * The climate entity has no deduplication in ESPHome, so only publish when
+ * something visible changed instead of on every poll.
+ */
+void PanasonicACCNT::publish_if_changed() {
+  auto same_float = [](float a, float b) { return (std::isnan(a) && std::isnan(b)) || a == b; };
+
+  if (this->has_published_ && this->data == this->published_data_ &&
+      same_float(this->current_temperature, this->published_current_temperature_) &&
+      this->action == this->published_action_)
+    return;
+
+  this->published_data_ = this->data;
+  this->published_current_temperature_ = this->current_temperature;
+  this->published_action_ = this->action;
+  this->has_published_ = true;
+  this->publish_state();
 }
 
 /*
@@ -639,7 +659,7 @@ void PanasonicACCNT::handle_packet() {
     }
 
     this->set_data(true);
-    this->publish_state();
+    this->publish_if_changed();
 
     if (this->state_ != ACState::Ready)
       this->state_ = ACState::Ready;  // Mark as ready after first poll
