@@ -9,8 +9,11 @@ namespace CNT {
 static const uint8_t CTRL_HEADER = 0xF0;  // The header for control frames
 static const uint8_t POLL_HEADER = 0x70;  // The header for the poll command
 
-static const int POLL_INTERVAL = 5000;  // The interval at which to poll the AC
-static const int CMD_INTERVAL = 250;    // The interval at which to send commands
+// Defaults, overridable from YAML (poll_interval_fast, poll_interval_slow, fast_poll_window)
+static const uint32_t DEFAULT_POLL_INTERVAL_FAST = 5000;  // Poll interval right after a change
+static const uint32_t DEFAULT_POLL_INTERVAL_SLOW = 5000;  // Poll interval when idle (same as fast = legacy behaviour)
+static const uint32_t DEFAULT_FAST_POLL_WINDOW = 60000;   // How long fast polling lasts after a change
+static const int CMD_INTERVAL = 250;                       // The interval at which to send commands
 
 enum class ACState {
   Initializing,  // Before first query response is receive
@@ -30,9 +33,19 @@ class PanasonicACCNT : public PanasonicAC {
 
   void setup() override;
   void loop() override;
+  void dump_config() override;
+
+  void set_poll_interval_fast(uint32_t ms) { this->poll_interval_fast_ = ms; }
+  void set_poll_interval_slow(uint32_t ms) { this->poll_interval_slow_ = ms; }
+  void set_fast_poll_window(uint32_t ms) { this->fast_poll_window_ = ms; }
 
  protected:
   ACState state_ = ACState::Initializing;  // Stores the internal state of the AC, used during initialization
+
+  uint32_t poll_interval_fast_{DEFAULT_POLL_INTERVAL_FAST};
+  uint32_t poll_interval_slow_{DEFAULT_POLL_INTERVAL_SLOW};
+  uint32_t fast_poll_window_{DEFAULT_FAST_POLL_WINDOW};
+  uint32_t last_change_{0};  // Last time a command was sent or the AC state changed (e.g. IR remote)
 
   // uint8_t data[10];
   std::vector<uint8_t> data = std::vector<uint8_t>(10);  // Stores the data received from the AC

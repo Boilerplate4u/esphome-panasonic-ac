@@ -41,6 +41,9 @@ CONF_ECONAVI_SWITCH = "econavi_switch"
 CONF_MILD_DRY_SWITCH = "mild_dry_switch"
 CONF_CURRENT_POWER_CONSUMPTION = "current_power_consumption"
 CONF_DEFROST_SENSOR = "defrost_sensor"
+CONF_POLL_INTERVAL_FAST = "poll_interval_fast"
+CONF_POLL_INTERVAL_SLOW = "poll_interval_slow"
+CONF_FAST_POLL_WINDOW = "fast_poll_window"
 CONF_WLAN = "wlan"
 CONF_CNT = "cnt"
 
@@ -78,7 +81,27 @@ PANASONIC_CNT_SCHEMA = {
         device_class=DEVICE_CLASS_POWER,
         state_class=STATE_CLASS_MEASUREMENT,
     ),
+    cv.Optional(CONF_POLL_INTERVAL_FAST, default="5s"): cv.All(
+        cv.positive_time_period_milliseconds,
+        cv.Range(min=cv.TimePeriod(milliseconds=1000)),
+    ),
+    cv.Optional(CONF_POLL_INTERVAL_SLOW): cv.All(  # defaults to poll_interval_fast
+        cv.positive_time_period_milliseconds,
+        cv.Range(min=cv.TimePeriod(milliseconds=1000), max=cv.TimePeriod(minutes=10)),
+    ),
+    cv.Optional(CONF_FAST_POLL_WINDOW, default="60s"): cv.positive_time_period_milliseconds,
 }
+
+
+def validate_poll_intervals(config):
+    fast = config.get(CONF_POLL_INTERVAL_FAST)
+    slow = config.get(CONF_POLL_INTERVAL_SLOW)
+    if fast is not None and slow is not None and slow < fast:
+        raise cv.Invalid(
+            f"{CONF_POLL_INTERVAL_SLOW} must be greater than or equal to {CONF_POLL_INTERVAL_FAST}"
+        )
+    return config
+
 
 CONFIG_SCHEMA = cv.typed_schema(
     {
@@ -86,6 +109,7 @@ CONFIG_SCHEMA = cv.typed_schema(
         CONF_CNT: climate.climate_schema(PanasonicACCNT).extend(PANASONIC_COMMON_SCHEMA).extend(PANASONIC_CNT_SCHEMA).extend(uart.UART_DEVICE_SCHEMA),
     }
 )
+CONFIG_SCHEMA = cv.All(CONFIG_SCHEMA, validate_poll_intervals)
 
 
 async def to_code(config):
@@ -133,3 +157,14 @@ async def to_code(config):
     if CONF_CURRENT_POWER_CONSUMPTION in config:
         sens = await sensor.new_sensor(config[CONF_CURRENT_POWER_CONSUMPTION])
         cg.add(var.set_current_power_consumption_sensor(sens))
+
+    if CONF_POLL_INTERVAL_FAST in config:
+        cg.add(var.set_poll_interval_fast(config[CONF_POLL_INTERVAL_FAST]))
+        # Without an explicit slow interval, poll at a constant rate (legacy behaviour)
+        cg.add(
+            var.set_poll_interval_slow(
+                config.get(CONF_POLL_INTERVAL_SLOW, config[CONF_POLL_INTERVAL_FAST])
+            )
+        )
+    if CONF_FAST_POLL_WINDOW in config:
+        cg.add(var.set_fast_poll_window(config[CONF_FAST_POLL_WINDOW]))

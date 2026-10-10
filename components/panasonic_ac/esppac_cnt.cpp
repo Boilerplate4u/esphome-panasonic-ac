@@ -3,6 +3,8 @@
 
 #include "esphome/core/log.h"
 
+#include <cinttypes>
+
 namespace esphome {
 namespace panasonic_ac {
 namespace CNT {
@@ -175,6 +177,13 @@ void PanasonicACCNT::setup() {
   PanasonicAC::setup();
 
   ESP_LOGD(TAG, "Using CZ-TACG1 protocol via CN-CNT");
+}
+
+void PanasonicACCNT::dump_config() {
+  ESP_LOGCONFIG(TAG, "Panasonic AC (CN-CNT):");
+  ESP_LOGCONFIG(TAG, "  Poll interval fast: %" PRIu32 " ms", this->poll_interval_fast_);
+  ESP_LOGCONFIG(TAG, "  Poll interval slow: %" PRIu32 " ms", this->poll_interval_slow_);
+  ESP_LOGCONFIG(TAG, "  Fast poll window: %" PRIu32 " ms", this->fast_poll_window_);
 }
 
 void PanasonicACCNT::loop() {
@@ -421,8 +430,13 @@ void PanasonicACCNT::send_packet(const std::vector<uint8_t> &packet, CommandType
  */
 
 void PanasonicACCNT::handle_poll() {
-  if (millis() - this->last_packet_sent_ > POLL_INTERVAL) {
-    ESP_LOGV(TAG, "Polling AC");
+  const uint32_t now = millis();
+  // Poll fast during initialization and for a while after a change, slow otherwise
+  const bool fast = this->state_ != ACState::Ready || now - this->last_change_ < this->fast_poll_window_;
+  const uint32_t interval = fast ? this->poll_interval_fast_ : this->poll_interval_slow_;
+
+  if (now - this->last_packet_sent_ > interval) {
+    ESP_LOGV(TAG, "Polling AC (%s, %" PRIu32 " ms)", fast ? "fast" : "slow", interval);
     send_command(CMD_POLL, CommandType::Normal, POLL_HEADER);
   }
 }
@@ -432,6 +446,7 @@ void PanasonicACCNT::handle_cmd() {
     ESP_LOGV(TAG, "Sending Command");
     send_command(this->cmd, CommandType::Normal, CTRL_HEADER);
     this->cmd.clear();
+    this->last_change_ = millis();  // Poll fast to confirm the new state
   }
 }
 
@@ -481,7 +496,14 @@ bool PanasonicACCNT::verify_packet() {
 
 void PanasonicACCNT::handle_packet() {
   if (this->rx_buffer_[0] == POLL_HEADER) {
-    this->data = std::vector<uint8_t>(this->rx_buffer_.begin() + 2, this->rx_buffer_.begin() + 12);
+    std::vector<uint8_t> new_data(this->rx_buffer_.begin() + 2, this->rx_buffer_.begin() + 12);
+
+    if (this->state_ == ACState::Ready && new_data != this->data) {
+      ESP_LOGV(TAG, "AC state changed, switching to fast polling");
+      this->last_change_ = millis();  // e.g. IR remote used, follow up quickly
+    }
+
+    this->data = new_data;
 
     this->set_data(true);
     this->publish_state();

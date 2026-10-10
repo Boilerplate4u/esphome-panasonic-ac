@@ -90,6 +90,19 @@ Examples:
 - If the temperature is actually lower than measured by the AC, set the difference as a negative offset.
   - E.g. actual temperature = 20°, AC measured temperature = 22° --> offset = -2°
 
+## Setting the poll interval (CZ-TACG1/cnt only)
+
+The AC is polled for its state at a fixed interval. To reduce traffic while still reacting quickly to changes, polling is adaptive:
+after a command is sent, or when the AC reports a changed state (e.g. the IR remote was used), the fast interval is used for `fast_poll_window`. After that the slow interval is used.
+
+```
+    poll_interval_fast: 5s    # default 5s, min 1s
+    poll_interval_slow: 30s   # default = poll_interval_fast (constant rate, legacy behaviour), must be >= fast, max 10min
+    fast_poll_window: 60s     # default 60s
+```
+
+Note that the outside temperature and power consumption sensors are only updated on each poll.
+
 # Hardware installation
 
 [Hardware installation for DNSK-P11](README.DNSKP11.md)
