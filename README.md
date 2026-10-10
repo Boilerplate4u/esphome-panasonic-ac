@@ -77,6 +77,7 @@ This offset is internally applied to both, the reported temperature in ESPHome/H
 
 - Temperature readings of the AC will be reported as (reading + offset)
 - Target temperatures will be set as (target - offset)
+- An external `current_temperature_sensor` is reported as is, without the offset
 
 ```
     # Adapt according to your measurements

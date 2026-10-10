@@ -227,7 +227,9 @@ void PanasonicAC::set_current_temperature_sensor(sensor::Sensor *current_tempera
   this->current_temperature_sensor_ = current_temperature_sensor;
   this->current_temperature_sensor_->add_on_state_callback([this](float state)
                                                            {
-                                                             this->current_temperature = state + this->current_temperature_offset_;
+                                                             // The offset compensates the AC's internal sensor only,
+                                                             // an external sensor is used as reported
+                                                             this->current_temperature = state;
                                                              this->publish_state();
                                                            });
 }
