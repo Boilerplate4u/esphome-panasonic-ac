@@ -1,4 +1,5 @@
 from esphome.const import (
+    CONF_TYPE,
     DEVICE_CLASS_TEMPERATURE,
     DEVICE_CLASS_POWER,
     STATE_CLASS_MEASUREMENT,
@@ -51,6 +52,42 @@ HORIZONTAL_SWING_OPTIONS = ["auto", "left", "left_center", "center", "right_cent
 
 VERTICAL_SWING_OPTIONS = ["swing", "auto", "up", "up_center", "center", "down_center", "down"]
 
+# Swing stepped by ESPHome through fixed positions (CN-CNT only)
+SIMULATED_SWING = "simulated_swing"
+CONF_VERTICAL_SWING_INTERVAL = "vertical_swing_interval"
+CONF_HORIZONTAL_SWING_INTERVAL = "horizontal_swing_interval"
+CONF_VERTICAL_SWING_POSITIONS = "vertical_swing_positions"
+CONF_HORIZONTAL_SWING_POSITIONS = "horizontal_swing_positions"
+CONF_CLIMATE_SWING = "climate_swing"
+
+# Fixed vane positions and their protocol nibble
+VERTICAL_POSITION_CODES = {"up": 0x1, "up_center": 0x2, "center": 0x3, "down_center": 0x4, "down": 0x5}
+HORIZONTAL_POSITION_CODES = {
+    "left": 0x9,
+    "left_center": 0xA,
+    "center": 0x6,
+    "right_center": 0xB,
+    "right": 0xC,
+}
+
+
+def swing_positions(codes):
+    def validator(value):
+        value = cv.ensure_list(cv.one_of(*codes, lower=True))(value)
+        if len(value) < 2:
+            raise cv.Invalid("At least 2 positions are needed to swing")
+        if len(set(value)) != len(value):
+            raise cv.Invalid("Positions must be unique")
+        return value
+
+    return validator
+
+
+SWING_INTERVAL = cv.All(
+    cv.positive_time_period_milliseconds,
+    cv.Range(min=cv.TimePeriod(seconds=2), max=cv.TimePeriod(minutes=10)),
+)
+
 SWITCH_SCHEMA = switch.switch_schema(PanasonicACSwitch).extend(cv.COMPONENT_SCHEMA)
 
 SELECT_SCHEMA = select.select_schema(PanasonicACSelect)
@@ -90,6 +127,15 @@ PANASONIC_CNT_SCHEMA = {
         cv.Range(min=cv.TimePeriod(milliseconds=1000), max=cv.TimePeriod(minutes=10)),
     ),
     cv.Optional(CONF_FAST_POLL_WINDOW, default="60s"): cv.positive_time_period_milliseconds,
+    cv.Optional(CONF_VERTICAL_SWING_INTERVAL, default="10s"): SWING_INTERVAL,
+    cv.Optional(CONF_HORIZONTAL_SWING_INTERVAL, default="10s"): SWING_INTERVAL,
+    cv.Optional(
+        CONF_VERTICAL_SWING_POSITIONS, default=list(VERTICAL_POSITION_CODES)
+    ): swing_positions(VERTICAL_POSITION_CODES),
+    cv.Optional(
+        CONF_HORIZONTAL_SWING_POSITIONS, default=list(HORIZONTAL_POSITION_CODES)
+    ): swing_positions(HORIZONTAL_POSITION_CODES),
+    cv.Optional(CONF_CLIMATE_SWING, default="native"): cv.one_of("native", "simulated", lower=True),
 }
 
 
@@ -128,13 +174,15 @@ async def to_code(config):
 
     if CONF_HORIZONTAL_SWING_SELECT in config:
         conf = config[CONF_HORIZONTAL_SWING_SELECT]
-        swing_select = await select.new_select(conf, options=HORIZONTAL_SWING_OPTIONS)
+        options = HORIZONTAL_SWING_OPTIONS + ([SIMULATED_SWING] if config[CONF_TYPE] == CONF_CNT else [])
+        swing_select = await select.new_select(conf, options=options)
         await cg.register_component(swing_select, conf)
         cg.add(var.set_horizontal_swing_select(swing_select))
 
     if CONF_VERTICAL_SWING_SELECT in config:
         conf = config[CONF_VERTICAL_SWING_SELECT]
-        swing_select = await select.new_select(conf, options=VERTICAL_SWING_OPTIONS)
+        options = VERTICAL_SWING_OPTIONS + ([SIMULATED_SWING] if config[CONF_TYPE] == CONF_CNT else [])
+        swing_select = await select.new_select(conf, options=options)
         await cg.register_component(swing_select, conf)
         cg.add(var.set_vertical_swing_select(swing_select))
 
@@ -177,3 +225,18 @@ async def to_code(config):
         )
     if CONF_FAST_POLL_WINDOW in config:
         cg.add(var.set_fast_poll_window(config[CONF_FAST_POLL_WINDOW]))
+
+    if config[CONF_TYPE] == CONF_CNT:
+        cg.add(var.set_vertical_swing_interval(config[CONF_VERTICAL_SWING_INTERVAL]))
+        cg.add(var.set_horizontal_swing_interval(config[CONF_HORIZONTAL_SWING_INTERVAL]))
+        cg.add(
+            var.set_vertical_swing_positions(
+                [VERTICAL_POSITION_CODES[p] for p in config[CONF_VERTICAL_SWING_POSITIONS]]
+            )
+        )
+        cg.add(
+            var.set_horizontal_swing_positions(
+                [HORIZONTAL_POSITION_CODES[p] for p in config[CONF_HORIZONTAL_SWING_POSITIONS]]
+            )
+        )
+        cg.add(var.set_climate_swing_simulated(config[CONF_CLIMATE_SWING] == "simulated"))

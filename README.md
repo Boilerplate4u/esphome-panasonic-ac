@@ -104,6 +104,29 @@ after a command is sent, or when the AC reports a changed state (e.g. the IR rem
 
 Note that the outside temperature and power consumption sensors are only updated on each poll.
 
+## Simulated swing (CZ-TACG1/cnt only)
+
+With the airflow direction set to `auto`, many Panasonic units do not swing in heating mode: the vertical vane is held at a fixed angle and the horizontal vane only swings once the indoor heat exchanger is hot. The option `simulated_swing` in the swing selects lets ESPHome step the vane back and forth through fixed positions instead, in every operating mode. The AC's own `auto` and `swing` options are kept unchanged.
+
+- The vane moves one position every `*_swing_interval` and turns around at the ends of the position list.
+- Choosing another option in the select, or changing the vane with the IR remote, ends the simulation.
+- While the AC is off the simulation pauses and continues when it is switched on again.
+- An active simulation is resumed after a restart of the ESP.
+- The select shows `simulated_swing` while active, so the individual steps do not fill the Home Assistant history.
+
+```
+    vertical_swing_interval: 10s      # time between vertical vane steps, default 10s, 2s to 10min
+    horizontal_swing_interval: 10s    # time between horizontal vane steps, default 10s, 2s to 10min
+    vertical_swing_positions: [up_center, center, down_center]                  # default: all 5
+    horizontal_swing_positions: [left, left_center, center, right_center, right] # default: all 5
+    climate_swing: native             # native (default) or simulated
+```
+
+`climate_swing` decides what the swing modes of the climate entity (`vertical`, `horizontal`, `both`) use:
+`native` sends the AC's own auto airflow direction as before, `simulated` uses the simulated swing. With `simulated`, `off` stops the simulation and returns the vanes to the position they had before.
+
+Whether the indoor unit beeps on every command received via CN-CNT depends on the model. Test this by changing a fixed vane position a few times before using short intervals.
+
 # Hardware installation
 
 [Hardware installation for DNSK-P11](README.DNSKP11.md)

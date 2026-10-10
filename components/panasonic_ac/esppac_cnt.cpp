@@ -2,6 +2,7 @@
 #include "esppac_commands_cnt.h"
 
 #include "esphome/core/log.h"
+#include "esphome/core/preferences.h"
 
 #include <algorithm>
 #include <cinttypes>
@@ -183,6 +184,25 @@ void PanasonicACCNT::setup() {
   this->last_packet_received_ = millis();
   this->last_change_ = millis();  // Start with fast polling after boot
 
+  // Resume a simulated swing that was active before the restart
+  this->swing_pref_ = this->make_entity_preference<SwingPrefs>(0x53574E47UL);  // Own key next to the climate state
+  SwingPrefs prefs{};
+  if (this->swing_pref_.load(&prefs)) {
+    if (prefs.vertical_active && this->vswing_.positions.size() >= 2) {
+      this->vswing_.active = true;
+      this->vswing_.needs_init = true;
+      this->vswing_.restore = prefs.vertical_restore;
+    }
+    if (prefs.horizontal_active && this->hswing_.positions.size() >= 2) {
+      this->hswing_.active = true;
+      this->hswing_.needs_init = true;
+      this->hswing_.restore = prefs.horizontal_restore;
+    }
+    if (this->vswing_.active || this->hswing_.active)
+      ESP_LOGI(TAG, "Resuming simulated swing (vertical: %s, horizontal: %s)", YESNO(this->vswing_.active),
+               YESNO(this->hswing_.active));
+  }
+
   ESP_LOGD(TAG, "Using CZ-TACG1 protocol via CN-CNT");
 }
 
@@ -191,6 +211,10 @@ void PanasonicACCNT::dump_config() {
   ESP_LOGCONFIG(TAG, "  Poll interval fast: %" PRIu32 " ms", this->poll_interval_fast_);
   ESP_LOGCONFIG(TAG, "  Poll interval slow: %" PRIu32 " ms", this->poll_interval_slow_);
   ESP_LOGCONFIG(TAG, "  Fast poll window: %" PRIu32 " ms", this->fast_poll_window_);
+  ESP_LOGCONFIG(TAG, "  Simulated swing: vertical every %" PRIu32 " ms over %u positions, horizontal every %" PRIu32
+                " ms over %u positions", this->vswing_.interval, (unsigned) this->vswing_.positions.size(),
+                this->hswing_.interval, (unsigned) this->hswing_.positions.size());
+  ESP_LOGCONFIG(TAG, "  Climate swing mode uses: %s", this->climate_swing_simulated_ ? "simulated swing" : "AC auto");
 }
 
 void PanasonicACCNT::loop() {
@@ -205,6 +229,8 @@ void PanasonicACCNT::loop() {
   }
 
   this->check_communication();
+  this->handle_swing(this->vswing_, true);
+  this->handle_swing(this->hswing_, false);
   handle_cmd();
   handle_poll();  // Handle sending poll packets
 }
@@ -266,12 +292,19 @@ void PanasonicACCNT::process_rx() {
 void PanasonicACCNT::publish_if_changed() {
   auto same_float = [](float a, float b) { return (std::isnan(a) && std::isnan(b)) || a == b; };
 
-  if (this->has_published_ && this->data == this->published_data_ &&
+  // Vane steps of a simulated swing are not visible in HA (the select shows simulated_swing)
+  std::vector<uint8_t> visible = this->data;
+  if (this->vswing_.active)
+    visible[4] = set_nibble(visible[4], 0, true);
+  if (this->hswing_.active)
+    visible[4] = set_nibble(visible[4], 0, false);
+
+  if (this->has_published_ && visible == this->published_data_ &&
       same_float(this->current_temperature, this->published_current_temperature_) &&
       this->action == this->published_action_)
     return;
 
-  this->published_data_ = this->data;
+  this->published_data_ = visible;
   this->published_current_temperature_ = this->current_temperature;
   this->published_action_ = this->action;
   this->has_published_ = true;
@@ -373,23 +406,42 @@ void PanasonicACCNT::control(const climate::ClimateCall &call) {
 
   if (call.get_swing_mode().has_value()) {
     ESP_LOGV(TAG, "Requested swing mode change");
+    const auto swing_mode = *call.get_swing_mode();
 
-    switch (*call.get_swing_mode()) {
-      case climate::CLIMATE_SWING_BOTH:
-        this->cmd[4] = 0xFD;
-        break;
-      case climate::CLIMATE_SWING_OFF:
-        this->cmd[4] = 0x36;  // Reset both to center
-        break;
-      case climate::CLIMATE_SWING_VERTICAL:
-        this->cmd[4] = 0xF6;  // Swing vertical, horizontal center
-        break;
-      case climate::CLIMATE_SWING_HORIZONTAL:
-        this->cmd[4] = 0x3D;  // Swing horizontal, vertical center
-        break;
-      default:
-        ESP_LOGV(TAG, "Unsupported swing mode requested");
-        break;
+    if (this->climate_swing_simulated_) {
+      const bool vertical = swing_mode == climate::CLIMATE_SWING_BOTH || swing_mode == climate::CLIMATE_SWING_VERTICAL;
+      const bool horizontal =
+          swing_mode == climate::CLIMATE_SWING_BOTH || swing_mode == climate::CLIMATE_SWING_HORIZONTAL;
+      if (vertical)
+        this->start_swing(this->vswing_, true);
+      else
+        this->stop_swing(this->vswing_, true, true);
+      if (horizontal)
+        this->start_swing(this->hswing_, false);
+      else
+        this->stop_swing(this->hswing_, false, true);
+    } else {
+      // The AC's own airflow direction replaces both vanes, end any simulated swing
+      this->stop_swing(this->vswing_, true, false);
+      this->stop_swing(this->hswing_, false, false);
+
+      switch (swing_mode) {
+        case climate::CLIMATE_SWING_BOTH:
+          this->cmd[4] = 0xFD;
+          break;
+        case climate::CLIMATE_SWING_OFF:
+          this->cmd[4] = 0x36;  // Reset both to center
+          break;
+        case climate::CLIMATE_SWING_VERTICAL:
+          this->cmd[4] = 0xF6;  // Swing vertical, horizontal center
+          break;
+        case climate::CLIMATE_SWING_HORIZONTAL:
+          this->cmd[4] = 0x3D;  // Swing horizontal, vertical center
+          break;
+        default:
+          ESP_LOGV(TAG, "Unsupported swing mode requested");
+          break;
+      }
     }
   }
 
@@ -472,8 +524,8 @@ void PanasonicACCNT::set_data(bool set) {
   }
 
   // "swing" (0xE) moves the vertical vanes just like "auto"
-  const bool vertical_moving = verticalSwing == "auto" || verticalSwing == "swing";
-  const bool horizontal_moving = horizontalSwing == "auto";
+  const bool vertical_moving = verticalSwing == "auto" || verticalSwing == "swing" || this->vswing_.active;
+  const bool horizontal_moving = horizontalSwing == "auto" || this->hswing_.active;
 
   if (vertical_moving && horizontal_moving)
     this->swing_mode = climate::CLIMATE_SWING_BOTH;
@@ -484,8 +536,8 @@ void PanasonicACCNT::set_data(bool set) {
   else
     this->swing_mode = climate::CLIMATE_SWING_OFF;
 
-  this->update_swing_vertical(verticalSwing);
-  this->update_swing_horizontal(horizontalSwing);
+  this->update_swing_vertical(this->vswing_.active ? StringRef(SIMULATED_SWING) : verticalSwing);
+  this->update_swing_horizontal(this->hswing_.active ? StringRef(SIMULATED_SWING) : horizontalSwing);
 
   this->set_custom_preset_(preset);
 
@@ -553,13 +605,17 @@ void PanasonicACCNT::handle_poll() {
  * Start building a command from the last known AC state. The command is rebased on fresh
  * data before it is sent, so changes made meanwhile (e.g. IR remote) are not overwritten.
  */
-void PanasonicACCNT::prepare_cmd() {
+void PanasonicACCNT::prepare_cmd(bool from_user) {
+  if (from_user)
+    this->cmd_from_user_ = true;
+
   if (!this->cmd.empty())
     return;
 
   ESP_LOGV(TAG, "Copying data to cmd");
   this->cmd = this->data;
   this->cmd_base_ = this->data;
+  this->cmd_force_.assign(this->data.size(), 0);
   this->cmd_needs_refresh_ = true;
   this->cmd_refresh_poll_sent_ = false;
 }
@@ -586,7 +642,7 @@ void PanasonicACCNT::rebase_cmd() {
   for (size_t i = 0; i < this->cmd.size() && i < 10; i++) {
     uint8_t merged = 0;
     for (uint8_t mask : CMD_FIELDS[i]) {
-      bool changed = ((this->cmd[i] ^ this->cmd_base_[i]) & mask) != 0;
+      bool changed = ((this->cmd[i] ^ this->cmd_base_[i]) & mask) != 0 || (this->cmd_force_[i] & mask) != 0;
       merged |= (changed ? this->cmd[i] : this->data[i]) & mask;
     }
     this->cmd[i] = merged;
@@ -617,7 +673,125 @@ void PanasonicACCNT::handle_cmd() {
   ESP_LOGV(TAG, "Sending Command");
   send_command(this->cmd, CommandType::Normal, CTRL_HEADER);
   this->cmd.clear();
-  this->last_change_ = millis();  // Poll fast to confirm the new state
+  if (this->cmd_from_user_)
+    this->last_change_ = millis();  // Poll fast to confirm the new state (not for simulated swing steps)
+  this->cmd_from_user_ = false;
+}
+
+/*
+ * Simulated swing
+ */
+
+void PanasonicACCNT::start_swing(SimulatedSwing &swing, bool vertical) {
+  if (swing.active)
+    return;
+  if (swing.positions.size() < 2) {
+    ESP_LOGW(TAG, "Simulated %s swing needs at least 2 positions", vertical ? "vertical" : "horizontal");
+    return;
+  }
+
+  ESP_LOGD(TAG, "Starting simulated %s swing", vertical ? "vertical" : "horizontal");
+  swing.active = true;
+  swing.needs_init = true;
+  swing.restore = get_nibble(this->data[4], vertical);  // Return here when stopped
+  this->save_swing_prefs();
+}
+
+void PanasonicACCNT::stop_swing(SimulatedSwing &swing, bool vertical, bool restore) {
+  if (!swing.active)
+    return;
+
+  ESP_LOGD(TAG, "Stopping simulated %s swing", vertical ? "vertical" : "horizontal");
+  swing.active = false;
+  this->save_swing_prefs();
+
+  if (restore && swing.restore != 0 && this->state_ == ACState::Ready) {
+    this->prepare_cmd();
+    this->set_vane(swing.restore, vertical);
+  }
+}
+
+void PanasonicACCNT::handle_swing(SimulatedSwing &swing, bool vertical) {
+  if (!swing.active || this->state_ != ACState::Ready || this->comm_lost_)
+    return;
+
+  const uint32_t now = millis();
+
+  if (swing.needs_init) {
+    const uint8_t current = get_nibble(this->data[4], vertical);
+    swing.commanded = current;
+    swing.previous = current;
+    auto it = std::find(swing.positions.begin(), swing.positions.end(), current);
+    swing.index = it != swing.positions.end() ? (size_t) (it - swing.positions.begin()) : SIZE_MAX;
+    swing.direction = 1;
+    swing.last_step = now - swing.interval;  // First step right away
+    swing.needs_init = false;
+  }
+
+  if ((this->data[0] & 0x0F) == 0)
+    return;  // AC is off, pause until it is switched on again
+
+  if (now - swing.last_step < swing.interval)
+    return;
+
+  const size_t count = swing.positions.size();
+  if (swing.index >= count) {
+    swing.index = 0;  // Current position is not part of the sweep, start at the first one
+  } else {
+    if ((swing.direction > 0 && swing.index + 1 >= count) || (swing.direction < 0 && swing.index == 0))
+      swing.direction = -swing.direction;  // Turn around at the ends
+    swing.index += swing.direction;
+  }
+
+  const uint8_t code = swing.positions[swing.index];
+  ESP_LOGV(TAG, "Simulated %s swing step to 0x%X", vertical ? "vertical" : "horizontal", code);
+  this->prepare_cmd(false);
+  this->set_vane(code, vertical);
+  swing.previous = swing.commanded;
+  swing.commanded = code;
+  swing.last_step = now;
+}
+
+/*
+ * Stop the simulation when the vane was changed by something else (e.g. IR remote).
+ * Returns true if the reported position is one the simulation set itself.
+ */
+bool PanasonicACCNT::check_swing_override(SimulatedSwing &swing, bool vertical) {
+  if (!swing.active || swing.needs_init)
+    return false;
+
+  const uint8_t reported = get_nibble(this->data[4], vertical);
+  if (reported == swing.commanded || reported == swing.previous)
+    return true;
+
+  ESP_LOGI(TAG, "%s vane changed outside the simulated swing, stopping it", vertical ? "Vertical" : "Horizontal");
+  swing.active = false;
+  this->save_swing_prefs();
+
+  if (!this->cmd.empty()) {  // Don't let a pending step overwrite the new position
+    this->cmd[4] = set_nibble(this->cmd[4], reported, vertical);
+    this->cmd_base_[4] = set_nibble(this->cmd_base_[4], reported, vertical);
+    this->cmd_force_[4] &= vertical ? 0x0F : 0xF0;
+  }
+  return false;
+}
+
+/*
+ * Set a vane in the pending command. The field is always taken from the command when it is
+ * rebased, even if it equals the (possibly outdated) state the command was built from.
+ */
+void PanasonicACCNT::set_vane(uint8_t nibble, bool vertical) {
+  this->cmd[4] = set_nibble(this->cmd[4], nibble, vertical);
+  this->cmd_force_[4] |= vertical ? 0xF0 : 0x0F;
+}
+
+void PanasonicACCNT::save_swing_prefs() {
+  SwingPrefs prefs{};
+  prefs.vertical_active = this->vswing_.active;
+  prefs.horizontal_active = this->hswing_.active;
+  prefs.vertical_restore = this->vswing_.restore;
+  prefs.horizontal_restore = this->hswing_.restore;
+  this->swing_pref_.save(&prefs);
 }
 
 /*
@@ -648,13 +822,23 @@ void PanasonicACCNT::handle_packet() {
     }
 
     std::vector<uint8_t> new_data(this->frame_.begin() + 2, this->frame_.begin() + 12);
+    std::vector<uint8_t> old_data = this->data;
+    this->data = new_data;
 
-    if (this->state_ == ACState::Ready && new_data != this->data) {
+    // Vane positions set by the simulated swing are not external changes
+    if (this->check_swing_override(this->vswing_, true)) {
+      new_data[4] = set_nibble(new_data[4], 0, true);
+      old_data[4] = set_nibble(old_data[4], 0, true);
+    }
+    if (this->check_swing_override(this->hswing_, false)) {
+      new_data[4] = set_nibble(new_data[4], 0, false);
+      old_data[4] = set_nibble(old_data[4], 0, false);
+    }
+
+    if (this->state_ == ACState::Ready && new_data != old_data) {
       ESP_LOGV(TAG, "AC state changed, switching to fast polling");
       this->last_change_ = millis();  // e.g. IR remote used, follow up quickly
     }
-
-    this->data = new_data;
 
     if (!this->cmd.empty()) {
       if (this->cmd_needs_refresh_)
@@ -682,24 +866,30 @@ void PanasonicACCNT::on_vertical_swing_change(const StringRef &swing) {
   if (this->state_ != ACState::Ready)
     return;
 
+  if (swing == SIMULATED_SWING) {
+    this->start_swing(this->vswing_, true);
+    return;
+  }
+  this->stop_swing(this->vswing_, true, false);  // Another choice ends the simulation
+
   ESP_LOGD(TAG, "Setting vertical swing position");
 
   this->prepare_cmd();
 
   if (swing == "down")
-    this->cmd[4] = (this->cmd[4] & 0x0F) + 0x50;
+    this->set_vane(0x50 >> 4, true);
   else if (swing == "down_center")
-    this->cmd[4] = (this->cmd[4] & 0x0F) + 0x40;
+    this->set_vane(0x40 >> 4, true);
   else if (swing == "center")
-    this->cmd[4] = (this->cmd[4] & 0x0F) + 0x30;
+    this->set_vane(0x30 >> 4, true);
   else if (swing == "up_center")
-    this->cmd[4] = (this->cmd[4] & 0x0F) + 0x20;
+    this->set_vane(0x20 >> 4, true);
   else if (swing == "up")
-    this->cmd[4] = (this->cmd[4] & 0x0F) + 0x10;
+    this->set_vane(0x10 >> 4, true);
   else if (swing == "swing")
-    this->cmd[4] = (this->cmd[4] & 0x0F) + 0xE0;
+    this->set_vane(0xE0 >> 4, true);
   else if (swing == "auto")
-    this->cmd[4] = (this->cmd[4] & 0x0F) + 0xF0;
+    this->set_vane(0xF0 >> 4, true);
   else {
     ESP_LOGW(TAG, "Unsupported vertical swing position received");
     return;
@@ -710,22 +900,28 @@ void PanasonicACCNT::on_horizontal_swing_change(const StringRef &swing) {
   if (this->state_ != ACState::Ready)
     return;
 
+  if (swing == SIMULATED_SWING) {
+    this->start_swing(this->hswing_, false);
+    return;
+  }
+  this->stop_swing(this->hswing_, false, false);  // Another choice ends the simulation
+
   ESP_LOGD(TAG, "Setting horizontal swing position");
 
   this->prepare_cmd();
 
   if (swing == "left")
-    this->cmd[4] = (this->cmd[4] & 0xF0) + 0x09;
+    this->set_vane(0x09, false);
   else if (swing == "left_center")
-    this->cmd[4] = (this->cmd[4] & 0xF0) + 0x0A;
+    this->set_vane(0x0A, false);
   else if (swing == "center")
-    this->cmd[4] = (this->cmd[4] & 0xF0) + 0x06;
+    this->set_vane(0x06, false);
   else if (swing == "right_center")
-    this->cmd[4] = (this->cmd[4] & 0xF0) + 0x0B;
+    this->set_vane(0x0B, false);
   else if (swing == "right")
-    this->cmd[4] = (this->cmd[4] & 0xF0) + 0x0C;
+    this->set_vane(0x0C, false);
   else if (swing == "auto")
-    this->cmd[4] = (this->cmd[4] & 0xF0) + 0x0D;
+    this->set_vane(0x0D, false);
   else {
     ESP_LOGW(TAG, "Unsupported horizontal swing position received");
     return;
