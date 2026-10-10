@@ -87,7 +87,6 @@ class PanasonicACCNT : public PanasonicAC {
   // uint8_t data[10];
   std::vector<uint8_t> data = std::vector<uint8_t>(10);  // Stores the data received from the AC
   std::vector<uint8_t> cmd;                              // Used to build next command
-  std::vector<uint8_t> cmd_base_;                        // AC state the pending command was built from
   std::vector<uint8_t> cmd_force_;                       // Bits always taken from the command when rebasing
   bool cmd_needs_refresh_{false};                        // Pending command must be rebased on fresh data
   bool cmd_refresh_poll_sent_{false};
@@ -114,6 +113,7 @@ class PanasonicACCNT : public PanasonicAC {
   void handle_swing(SimulatedSwing &swing, bool vertical);
   bool check_swing_override(SimulatedSwing &swing, bool vertical);
   void save_swing_prefs();
+  void set_field(size_t index, uint8_t value, uint8_t mask = 0xFF);
   void set_vane(uint8_t nibble, bool vertical);
   static uint8_t get_nibble(uint8_t value, bool vertical) { return vertical ? value >> 4 : value & 0x0F; }
   static uint8_t set_nibble(uint8_t value, uint8_t nibble, bool vertical) {

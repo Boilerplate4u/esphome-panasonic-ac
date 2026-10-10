@@ -350,22 +350,22 @@ void PanasonicACCNT::control(const climate::ClimateCall &call) {
 
     switch (*call.get_mode()) {
       case climate::CLIMATE_MODE_COOL:
-        this->cmd[0] = 0x34;
+        this->set_field(0, 0x34);  // Mode and power
         break;
       case climate::CLIMATE_MODE_HEAT:
-        this->cmd[0] = 0x44;
+        this->set_field(0, 0x44);  // Mode and power
         break;
       case climate::CLIMATE_MODE_DRY:
-        this->cmd[0] = 0x24;
+        this->set_field(0, 0x24);  // Mode and power
         break;
       case climate::CLIMATE_MODE_HEAT_COOL:
-        this->cmd[0] = 0x04;
+        this->set_field(0, 0x04);  // Mode and power
         break;
       case climate::CLIMATE_MODE_FAN_ONLY:
-        this->cmd[0] = 0x64;
+        this->set_field(0, 0x64);  // Mode and power
         break;
       case climate::CLIMATE_MODE_OFF:
-        this->cmd[0] = this->cmd[0] & 0xF0;  // Strip right nib to turn AC off
+        this->set_field(0, 0x00, 0x0F);  // Clear the power nibble to turn the AC off, keep the mode
         break;
       default:
         ESP_LOGV(TAG, "Unsupported mode requested");
@@ -375,7 +375,7 @@ void PanasonicACCNT::control(const climate::ClimateCall &call) {
 
   if (call.get_target_temperature().has_value()) {
     ESP_LOGV(TAG, "Requested target temp change to %.2f, %.2f including offset", *call.get_target_temperature(), *call.get_target_temperature() - this->current_temperature_offset_);
-    this->cmd[1] = (*call.get_target_temperature() - this->current_temperature_offset_) / TEMPERATURE_STEP;
+    this->set_field(1, (uint8_t) ((*call.get_target_temperature() - this->current_temperature_offset_) / TEMPERATURE_STEP));
   }
 
   if (call.has_custom_fan_mode()) {
@@ -383,23 +383,23 @@ void PanasonicACCNT::control(const climate::ClimateCall &call) {
 
     if (this->get_custom_preset() != "Normal") {
       ESP_LOGV(TAG, "Resetting preset");
-      this->cmd[5] = (this->cmd[5] & 0xF0);  // Clear right nib for normal mode
+      this->set_field(5, 0x00, 0x0F);  // Clear the preset nibble for normal mode
     }
 
     const auto fanMode = call.get_custom_fan_mode();
 
     if (fanMode == "Automatic")
-      this->cmd[3] = 0xA0;
+      this->set_field(3, 0xA0);
     else if (fanMode == "1")
-      this->cmd[3] = 0x30;
+      this->set_field(3, 0x30);
     else if (fanMode == "2")
-      this->cmd[3] = 0x40;
+      this->set_field(3, 0x40);
     else if (fanMode == "3")
-      this->cmd[3] = 0x50;
+      this->set_field(3, 0x50);
     else if (fanMode == "4")
-      this->cmd[3] = 0x60;
+      this->set_field(3, 0x60);
     else if (fanMode == "5")
-      this->cmd[3] = 0x70;
+      this->set_field(3, 0x70);
     else
       ESP_LOGV(TAG, "Unsupported fan mode requested");
   }
@@ -427,16 +427,16 @@ void PanasonicACCNT::control(const climate::ClimateCall &call) {
 
       switch (swing_mode) {
         case climate::CLIMATE_SWING_BOTH:
-          this->cmd[4] = 0xFD;
+          this->set_field(4, 0xFD);
           break;
         case climate::CLIMATE_SWING_OFF:
-          this->cmd[4] = 0x36;  // Reset both to center
+          this->set_field(4, 0x36);  // Reset both to center
           break;
         case climate::CLIMATE_SWING_VERTICAL:
-          this->cmd[4] = 0xF6;  // Swing vertical, horizontal center
+          this->set_field(4, 0xF6);  // Swing vertical, horizontal center
           break;
         case climate::CLIMATE_SWING_HORIZONTAL:
-          this->cmd[4] = 0x3D;  // Swing horizontal, vertical center
+          this->set_field(4, 0x3D);  // Swing horizontal, vertical center
           break;
         default:
           ESP_LOGV(TAG, "Unsupported swing mode requested");
@@ -451,11 +451,11 @@ void PanasonicACCNT::control(const climate::ClimateCall &call) {
     const auto preset = call.get_custom_preset();
 
     if (preset == "Normal")
-      this->cmd[5] = (this->cmd[5] & 0xF0);  // Clear right nib for normal mode
+      this->set_field(5, 0x00, 0x0F);  // Normal: clear the preset nibble
     else if (preset == "Powerful")
-      this->cmd[5] = (this->cmd[5] & 0xF0) + 0x02;  // Clear right nib and set powerful mode
+      this->set_field(5, 0x02, 0x0F);  // Powerful
     else if (preset == "Quiet")
-      this->cmd[5] = (this->cmd[5] & 0xF0) + 0x04;  // Clear right nib and set quiet mode
+      this->set_field(5, 0x04, 0x0F);  // Quiet
     else
       ESP_LOGV(TAG, "Unsupported preset requested");
   }
@@ -614,16 +614,16 @@ void PanasonicACCNT::prepare_cmd(bool from_user) {
 
   ESP_LOGV(TAG, "Copying data to cmd");
   this->cmd = this->data;
-  this->cmd_base_ = this->data;
   this->cmd_force_.assign(this->data.size(), 0);
   this->cmd_needs_refresh_ = true;
   this->cmd_refresh_poll_sent_ = false;
 }
 
 /*
- * Protocol fields per data byte as bit masks. A field changed by ESPHome/HA is taken from cmd as a
- * whole, all other fields from the latest AC state. Merging per field (not per bit) keeps numeric
- * values such as the target temperature intact.
+ * Protocol fields per data byte as bit masks. A field set by ESPHome/HA (see set_field) is taken
+ * from cmd as a whole, all other fields from the latest AC state. This also works when the value
+ * set equals the outdated state the command was built from, e.g. HA sets 22 °C right after the
+ * IR remote changed 22 °C to 24 °C.
  */
 static const std::vector<uint8_t> CMD_FIELDS[10] = {
     {0xF0, 0x0F},                    // 0: mode | power
@@ -642,7 +642,7 @@ void PanasonicACCNT::rebase_cmd() {
   for (size_t i = 0; i < this->cmd.size() && i < 10; i++) {
     uint8_t merged = 0;
     for (uint8_t mask : CMD_FIELDS[i]) {
-      bool changed = ((this->cmd[i] ^ this->cmd_base_[i]) & mask) != 0 || (this->cmd_force_[i] & mask) != 0;
+      bool changed = (this->cmd_force_[i] & mask) != 0;  // Field explicitly set by ESPHome
       merged |= (changed ? this->cmd[i] : this->data[i]) & mask;
     }
     this->cmd[i] = merged;
@@ -770,19 +770,23 @@ bool PanasonicACCNT::check_swing_override(SimulatedSwing &swing, bool vertical) 
 
   if (!this->cmd.empty()) {  // Don't let a pending step overwrite the new position
     this->cmd[4] = set_nibble(this->cmd[4], reported, vertical);
-    this->cmd_base_[4] = set_nibble(this->cmd_base_[4], reported, vertical);
     this->cmd_force_[4] &= vertical ? 0x0F : 0xF0;
   }
   return false;
 }
 
 /*
- * Set a vane in the pending command. The field is always taken from the command when it is
- * rebased, even if it equals the (possibly outdated) state the command was built from.
+ * Set bits of a field in the pending command. Fields set this way are always taken from the
+ * command when it is rebased on fresh AC state, even if the value equals the (possibly
+ * outdated) state the command was built from. Everything else is taken from the AC.
  */
+void PanasonicACCNT::set_field(size_t index, uint8_t value, uint8_t mask) {
+  this->cmd[index] = (this->cmd[index] & ~mask) | (value & mask);
+  this->cmd_force_[index] |= mask;
+}
+
 void PanasonicACCNT::set_vane(uint8_t nibble, bool vertical) {
-  this->cmd[4] = set_nibble(this->cmd[4], nibble, vertical);
-  this->cmd_force_[4] |= vertical ? 0xF0 : 0x0F;
+  this->set_field(4, vertical ? (uint8_t) (nibble << 4) : nibble, vertical ? 0xF0 : 0x0F);
 }
 
 void PanasonicACCNT::save_swing_prefs() {
@@ -938,10 +942,10 @@ void PanasonicACCNT::on_nanoex_change(bool state) {
 
   if (state) {
     ESP_LOGV(TAG, "Turning nanoex on");
-    this->cmd[5] |= 0x40;  // Only touch the nanoex bit
+    this->set_field(5, 0x40, 0x40);  // Only touch the nanoex bit
   } else {
     ESP_LOGV(TAG, "Turning nanoex off");
-    this->cmd[5] &= ~0x40;
+    this->set_field(5, 0x00, 0x40);
   }
 }
 
@@ -955,10 +959,10 @@ void PanasonicACCNT::on_eco_change(bool state) {
 
   if (state) {
     ESP_LOGV(TAG, "Turning eco mode on");
-    this->cmd[8] = 0x40;
+    this->set_field(8, 0x40);
   } else {
     ESP_LOGV(TAG, "Turning eco mode off");
-    this->cmd[8] = 0x00;
+    this->set_field(8, 0x00);
   }
 }
 
@@ -972,10 +976,10 @@ void PanasonicACCNT::on_econavi_change(bool state) {
 
   if (state) {
     ESP_LOGV(TAG, "Turning econavi mode on");
-    this->cmd[5] |= 0x10;  // Only touch the econavi bit, keep preset and nanoex
+    this->set_field(5, 0x10, 0x10);  // Only touch the econavi bit, keep preset and nanoex
   } else {
     ESP_LOGV(TAG, "Turning econavi mode off");
-    this->cmd[5] &= ~0x10;
+    this->set_field(5, 0x00, 0x10);
   }
 }
 
@@ -989,10 +993,10 @@ void PanasonicACCNT::on_mild_dry_change(bool state) {
 
   if (state) {
     ESP_LOGV(TAG, "Turning mild dry on");
-    this->cmd[2] = 0x7F;
+    this->set_field(2, 0x7F);
   } else {
     ESP_LOGV(TAG, "Turning mild dry off");
-    this->cmd[2] = 0x80;
+    this->set_field(2, 0x80);
   }
 }
 
