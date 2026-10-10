@@ -14,6 +14,7 @@ static const uint32_t DEFAULT_POLL_INTERVAL_FAST = 5000;  // Poll interval right
 static const uint32_t DEFAULT_POLL_INTERVAL_SLOW = 5000;  // Poll interval when idle (same as fast = legacy behaviour)
 static const uint32_t DEFAULT_FAST_POLL_WINDOW = 60000;   // How long fast polling lasts after a change
 static const int CMD_INTERVAL = 250;                       // The interval at which to send commands
+static const uint32_t CMD_REFRESH_TIMEOUT = 1000;          // Max wait for a fresh poll before sending a command
 
 enum class ACState {
   Initializing,  // Before first query response is receive
@@ -50,9 +51,15 @@ class PanasonicACCNT : public PanasonicAC {
   // uint8_t data[10];
   std::vector<uint8_t> data = std::vector<uint8_t>(10);  // Stores the data received from the AC
   std::vector<uint8_t> cmd;                              // Used to build next command
+  std::vector<uint8_t> cmd_base_;                        // AC state the pending command was built from
+  bool cmd_needs_refresh_{false};                        // Pending command must be rebased on fresh data
+  bool cmd_refresh_poll_sent_{false};
+  uint32_t cmd_refresh_poll_time_{0};
 
   void handle_poll();
   void handle_cmd();
+  void prepare_cmd();
+  void rebase_cmd();
 
   void set_data(bool set);
 

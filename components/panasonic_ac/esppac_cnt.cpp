@@ -216,10 +216,7 @@ void PanasonicACCNT::control(const climate::ClimateCall &call) {
   if (this->state_ != ACState::Ready)
     return;
 
-  if (this->cmd.empty()) {
-    ESP_LOGV(TAG, "Copying data to cmd");
-    this->cmd = this->data;
-  }
+  this->prepare_cmd();
 
   if (call.get_mode().has_value()) {
     ESP_LOGV(TAG, "Requested mode change");
@@ -441,13 +438,75 @@ void PanasonicACCNT::handle_poll() {
   }
 }
 
-void PanasonicACCNT::handle_cmd() {
-  if (!this->cmd.empty() && millis() - this->last_packet_sent_ > CMD_INTERVAL) {
-    ESP_LOGV(TAG, "Sending Command");
-    send_command(this->cmd, CommandType::Normal, CTRL_HEADER);
-    this->cmd.clear();
-    this->last_change_ = millis();  // Poll fast to confirm the new state
+/*
+ * Start building a command from the last known AC state. The command is rebased on fresh
+ * data before it is sent, so changes made meanwhile (e.g. IR remote) are not overwritten.
+ */
+void PanasonicACCNT::prepare_cmd() {
+  if (!this->cmd.empty())
+    return;
+
+  ESP_LOGV(TAG, "Copying data to cmd");
+  this->cmd = this->data;
+  this->cmd_base_ = this->data;
+  this->cmd_needs_refresh_ = true;
+  this->cmd_refresh_poll_sent_ = false;
+}
+
+/*
+ * Protocol fields per data byte as bit masks. A field changed by ESPHome/HA is taken from cmd as a
+ * whole, all other fields from the latest AC state. Merging per field (not per bit) keeps numeric
+ * values such as the target temperature intact.
+ */
+static const std::vector<uint8_t> CMD_FIELDS[10] = {
+    {0xF0, 0x0F},                    // 0: mode | power
+    {0xFF},                          // 1: target temperature
+    {0xFF},                          // 2: mild dry
+    {0xFF},                          // 3: fan speed
+    {0xF0, 0x0F},                    // 4: vertical swing | horizontal swing
+    {0x0F, 0x10, 0x40, 0x20, 0x80},  // 5: preset | econavi | nanoex | unknown bits
+    {0xFF},                          // 6
+    {0xFF},                          // 7
+    {0xFF},                          // 8: eco
+    {0xFF},                          // 9
+};
+
+void PanasonicACCNT::rebase_cmd() {
+  for (size_t i = 0; i < this->cmd.size() && i < 10; i++) {
+    uint8_t merged = 0;
+    for (uint8_t mask : CMD_FIELDS[i]) {
+      bool changed = ((this->cmd[i] ^ this->cmd_base_[i]) & mask) != 0;
+      merged |= (changed ? this->cmd[i] : this->data[i]) & mask;
+    }
+    this->cmd[i] = merged;
   }
+  this->cmd_needs_refresh_ = false;
+  ESP_LOGV(TAG, "Command rebased on fresh AC state");
+}
+
+void PanasonicACCNT::handle_cmd() {
+  if (this->cmd.empty() || millis() - this->last_packet_sent_ <= CMD_INTERVAL)
+    return;
+
+  if (this->cmd_needs_refresh_) {
+    if (!this->cmd_refresh_poll_sent_) {
+      ESP_LOGV(TAG, "Polling AC before sending command");
+      send_command(CMD_POLL, CommandType::Normal, POLL_HEADER);
+      this->cmd_refresh_poll_sent_ = true;
+      this->cmd_refresh_poll_time_ = millis();
+      return;
+    }
+    if (millis() - this->cmd_refresh_poll_time_ < CMD_REFRESH_TIMEOUT)
+      return;  // Wait for the poll response
+
+    ESP_LOGW(TAG, "No poll response, sending command based on possibly stale state");
+    this->cmd_needs_refresh_ = false;
+  }
+
+  ESP_LOGV(TAG, "Sending Command");
+  send_command(this->cmd, CommandType::Normal, CTRL_HEADER);
+  this->cmd.clear();
+  this->last_change_ = millis();  // Poll fast to confirm the new state
 }
 
 /*
@@ -505,6 +564,14 @@ void PanasonicACCNT::handle_packet() {
 
     this->data = new_data;
 
+    if (!this->cmd.empty()) {
+      if (this->cmd_needs_refresh_)
+        this->rebase_cmd();
+      // Don't publish while a command is pending, it would briefly revert the
+      // optimistic state of switches/selects in HA. The next poll publishes.
+      return;
+    }
+
     this->set_data(true);
     this->publish_state();
 
@@ -525,10 +592,7 @@ void PanasonicACCNT::on_vertical_swing_change(const StringRef &swing) {
 
   ESP_LOGD(TAG, "Setting vertical swing position");
 
-  if (this->cmd.empty()) {
-    ESP_LOGV(TAG, "Copying data to cmd");
-    this->cmd = this->data;
-  }
+  this->prepare_cmd();
 
   if (swing == "down")
     this->cmd[4] = (this->cmd[4] & 0x0F) + 0x50;
@@ -556,10 +620,7 @@ void PanasonicACCNT::on_horizontal_swing_change(const StringRef &swing) {
 
   ESP_LOGD(TAG, "Setting horizontal swing position");
 
-  if (this->cmd.empty()) {
-    ESP_LOGV(TAG, "Copying data to cmd");
-    this->cmd = this->data;
-  }
+  this->prepare_cmd();
 
   if (swing == "left")
     this->cmd[4] = (this->cmd[4] & 0xF0) + 0x09;
@@ -583,10 +644,7 @@ void PanasonicACCNT::on_nanoex_change(bool state) {
   if (this->state_ != ACState::Ready)
     return;
 
-  if (this->cmd.empty()) {
-    ESP_LOGV(TAG, "Copying data to cmd");
-    this->cmd = this->data;
-  }
+  this->prepare_cmd();
 
   this->nanoex_state_ = state;
 
@@ -603,10 +661,7 @@ void PanasonicACCNT::on_eco_change(bool state) {
   if (this->state_ != ACState::Ready)
     return;
 
-  if (this->cmd.empty()) {
-    ESP_LOGV(TAG, "Copying data to cmd");
-    this->cmd = this->data;
-  }
+  this->prepare_cmd();
 
   this->eco_state_ = state;
 
@@ -623,10 +678,7 @@ void PanasonicACCNT::on_econavi_change(bool state) {
   if (this->state_ != ACState::Ready)
     return;
 
-  if (this->cmd.empty()) {
-    ESP_LOGV(TAG, "Copying data to cmd");
-    this->cmd = this->data;
-  }
+  this->prepare_cmd();
 
   this->econavi_state_ = state;
 
@@ -643,10 +695,7 @@ void PanasonicACCNT::on_mild_dry_change(bool state) {
   if (this->state_ != ACState::Ready)
     return;
 
-  if (this->cmd.empty()) {
-    ESP_LOGV(TAG, "Copying data to cmd");
-    this->cmd = this->data;
-  }
+  this->prepare_cmd();
 
   this->mild_dry_state_ = state;
 
