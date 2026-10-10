@@ -2,11 +2,13 @@
 
 An open source alternative for the Panasonic wi-fi adapter that works locally without the cloud.
 
+> **This fork** adds adaptive polling, safe handling of the IR remote, simulated vane swing and several fixes for CZ-TACG1 (CN-CNT). Everything that is new or changed compared to [DomiStyle/esphome-panasonic-ac](https://github.com/DomiStyle/esphome-panasonic-ac) is marked **New:** or **Changed:** below. See the [changelog](CHANGELOG.md) for details.
+
 # Documentation
 
-* [Example configuration](panasonic.yaml) with all options
-* [Changelog](CHANGELOG.md): what changed, and what to check in an existing configuration
-* [Vane control and simulated swing](docs/swing.md): how Panasonic controls the vanes and why `auto` does not swing in heating mode
+* [Example configuration](panasonic.yaml) with all options (**Changed:** renamed from `ac.yaml.example`)
+* **New:** [Changelog](CHANGELOG.md): what changed, and what to check in an existing configuration
+* **New:** [Vane control and simulated swing](docs/swing.md): how Panasonic controls the vanes and why `auto` does not swing in heating mode
 * Hardware installation for [CZ-TACG1 (CN-CNT)](README.CZTACG1.md) and [DNSK-P11 (CN-WLAN)](README.DNSKP11.md)
 
 # Features
@@ -16,8 +18,8 @@ An open source alternative for the Panasonic wi-fi adapter that works locally wi
 * Receive live reports and state from the AC
 * Uses the UART interface on the AC instead of the IR interface
 * Provides a drop-in replacement for the Panasonic DNSK-P11 and the CZ-TACG1 wifi module
-* Works together with the IR remote: settings made with the remote are kept when Home Assistant sends a command (CZ-TACG1)
-* Adaptive polling and simulated vane swing in every operating mode, also in heating (CZ-TACG1)
+* **New:** Works together with the IR remote: settings made with the remote are kept when Home Assistant sends a command (CZ-TACG1)
+* **New:** Adaptive polling and simulated vane swing in every operating mode, also in heating (CZ-TACG1)
 
 # Supported hardware
 
@@ -33,7 +35,7 @@ Works on the ESP8266 but ESP32 is preferred for the multiple hardware serial por
 * Soldering iron
 * Wires to solder from Logic converter to ESP
 * Heat shrink
-* ESPHome 2026.4.0 or newer
+* ESPHome 2026.4.0 or newer (**Changed:** corrected from 2025.11.0, which the code no longer supported)
 * Home Assistant 2025.11.0 or newer
 
 # Notes
@@ -85,7 +87,7 @@ This offset is internally applied to both, the reported temperature in ESPHome/H
 
 - Temperature readings of the AC will be reported as (reading + offset)
 - Target temperatures will be set as (target - offset)
-- An external `current_temperature_sensor` is reported as is, without the offset
+- **Changed:** An external `current_temperature_sensor` is reported as is, without the offset
 
 ```
     # Adapt according to your measurements
@@ -100,6 +102,8 @@ Examples:
   - E.g. actual temperature = 20°, AC measured temperature = 22° --> offset = -2°
 
 ## Polling (CZ-TACG1/cnt only)
+
+**New:** added in this fork.
 
 **Why:** The CN-CNT protocol has no notifications. The ESP has to ask the AC for its state (poll) to see changes, for example from the IR remote, and to update the outside temperature and power sensors. Polling every few seconds around the clock is rarely needed, so the interval adapts: fast while something is happening, slow otherwise.
 
@@ -120,11 +124,15 @@ Examples:
 
 ## IR remote and Home Assistant together (CZ-TACG1/cnt only)
 
+**New:** added in this fork.
+
 Every command on CN-CNT carries the complete state of the AC (mode, power, temperature, fan, vanes, presets). The ESP therefore polls right before sending, and only applies the settings you set in Home Assistant on top of the AC's current state. Settings made with the IR remote in the meantime are kept, and a value set in Home Assistant always applies, also when it equals the value the AC had before the remote was used.
 
 Earlier versions built the command from the last poll. A change made with the IR remote shortly before a command from Home Assistant could be reverted, which could for example switch the AC off again.
 
 ## Simulated swing (CZ-TACG1/cnt only)
+
+**New:** added in this fork.
 
 **Why:** With the airflow direction set to `auto`, many Panasonic units do not swing in heating mode. According to the service manual of e.g. the CS-HZ25TKE, the vertical vane is then held at a fixed angle chosen from the temperature of the indoor heat exchanger (coil), and the horizontal vane only swings once the coil is above about 43 °C. In cooling, fan and dry mode both vanes swing. Background: [docs/swing.md](docs/swing.md).
 
@@ -187,6 +195,8 @@ climate:
 Whether the indoor unit beeps on every command received via CN-CNT depends on the model. Test this by changing a fixed vane position in Home Assistant a few times before using short intervals.
 
 ## Communication loss (CZ-TACG1/cnt only)
+
+**New:** added in this fork.
 
 If the AC has not answered for three times the slow poll interval plus 2 s (17 s with the defaults), the ESP logs a warning and sets the component warning status (a configured `status_led` blinks). The outside temperature, the power consumption and the current temperature (unless an external `current_temperature_sensor` is used) are reported as unknown. Everything is updated again with the next valid answer.
 
